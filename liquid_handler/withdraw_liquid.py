@@ -3,13 +3,12 @@
 Workflow:
   1. A popup window asks the user how many microliters (uL) to withdraw.
   2. The liquid handler picks up a tip, aspirates that volume from the
-     source well, and discards the tip into the trash.
+     source well, and discards the tip into the wash station's waste port.
 
-Built on PyLabRobot (https://docs.pylabrobot.org), which supports many
-liquid handler brands (Hamilton, Tecan, Opentrons, ...) through a common
-API. This script runs in SIMULATION by default (no hardware required) so
-you can try it out safely. To run on real hardware, see "Switching to
-real hardware" below.
+Built on PyLabRobot (https://docs.pylabrobot.org) targeting a Tecan
+Freedom EVO liquid handler. This script runs in SIMULATION by default
+(no hardware required) so you can try it out safely. To run on real
+hardware, see "Switching to real hardware" below.
 """
 
 import asyncio
@@ -18,18 +17,23 @@ from tkinter import simpledialog
 
 from pylabrobot.liquid_handling import LiquidHandler
 from pylabrobot.liquid_handling.backends import LiquidHandlerChatterboxBackend
-from pylabrobot.resources import (
-    TIP_CAR_480_A00,
-    PLT_CAR_L5AC_A00,
-    STARLetDeck,
-    hamilton_96_tiprack_300uL_filter,
+from pylabrobot.resources.tecan import (
+    EVO150Deck,
+    DiTi_SBS_3_Pos_MCA96,
+    DiTi_100ul_Te_MO,
+    MP_3Pos_PCR,
+    DeepWell_96_Well,
 )
-from pylabrobot.resources.corning import cor_96_wellplate_360uL_Fb
 
 # Well the liquid handler withdraws from, and the tip position it uses.
-# Change these to match your physical deck layout.
+# Change these -- along with the deck layout in withdraw_and_discard() --
+# to match your physical deck.
 SOURCE_WELL = "A1"
 TIP_SPOT = "A1"
+
+# The tip type below (DiTi_100ul_Te_MO) holds up to 110 uL -- keep the
+# popup's max in sync with whatever tip you actually use.
+MAX_VOLUME_UL = 100.0
 
 
 def ask_volume_ul() -> float | None:
@@ -43,7 +47,7 @@ def ask_volume_ul() -> float | None:
         title="Withdraw Liquid",
         prompt="Enter volume to withdraw (uL):",
         minvalue=0.1,
-        maxvalue=1000.0,
+        maxvalue=MAX_VOLUME_UL,
         parent=root,
     )
     root.destroy()
@@ -52,25 +56,29 @@ def ask_volume_ul() -> float | None:
 
 async def withdraw_and_discard(volume_ul: float) -> None:
     """Pick up a tip, aspirate volume_ul from the source well, discard the tip."""
-    deck = STARLetDeck()
+    # with_wash_station=True (the default) gives the deck a wash station
+    # with a waste port we use as the tip trash.
+    deck = EVO150Deck()
 
-    tip_carrier = TIP_CAR_480_A00(name="tip carrier")
-    tip_carrier[0] = tip_rack = hamilton_96_tiprack_300uL_filter(name="tip rack")
-    deck.assign_child_resource(tip_carrier, rails=1)
+    tip_carrier = DiTi_SBS_3_Pos_MCA96(name="tip carrier")
+    tip_carrier[0] = tip_rack = DiTi_100ul_Te_MO(name="tip rack")
+    deck.assign_child_resource(tip_carrier, rails=10)
 
-    plate_carrier = PLT_CAR_L5AC_A00(name="plate carrier")
-    plate_carrier[0] = source_plate = cor_96_wellplate_360uL_Fb(name="source plate")
-    deck.assign_child_resource(plate_carrier, rails=9)
+    plate_carrier = MP_3Pos_PCR(name="plate carrier")
+    plate_carrier[0] = source_plate = DeepWell_96_Well(name="source plate")
+    deck.assign_child_resource(plate_carrier, rails=16)
+
+    waste = deck.get_resource("wash_waste")
 
     # LiquidHandlerChatterboxBackend just prints each command -- swap this
-    # out for a real backend to run on hardware (see module docstring).
+    # out for the real EVO backend to run on hardware (see module docstring).
     lh = LiquidHandler(backend=LiquidHandlerChatterboxBackend(), deck=deck)
     await lh.setup()
 
     try:
         await lh.pick_up_tips(tip_rack[TIP_SPOT])
         await lh.aspirate(source_plate[SOURCE_WELL], vols=[volume_ul])
-        await lh.discard_tips()
+        await lh.drop_tips([waste], allow_nonzero_volume=True)
     finally:
         await lh.stop()
 
@@ -90,15 +98,20 @@ if __name__ == "__main__":
     main()
 
 # --- Switching to real hardware -------------------------------------------
-# 1. Replace LiquidHandlerChatterboxBackend() above with the backend for
-#    your instrument, e.g.:
-#      from pylabrobot.liquid_handling.backends import STAR   # Hamilton STAR
-#      lh = LiquidHandler(backend=STAR(), deck=deck)
-#    or:
-#      from pylabrobot.liquid_handling.backends import EVO    # Tecan EVO
-#      lh = LiquidHandler(backend=EVO(), deck=deck)
-# 2. Update SOURCE_WELL, TIP_SPOT, and the deck/resource setup in
-#    withdraw_and_discard() to match your actual deck layout (labware
-#    types and rail/carrier positions).
-# 3. See https://docs.pylabrobot.org for the full list of supported
-#    backends and how to configure each one (USB/network connection, etc).
+# 1. Replace LiquidHandlerChatterboxBackend() above with the real EVO
+#    backend:
+#      from pylabrobot.liquid_handling.backends import EVO
+#      # diti_count = number of LiHa channels configured for disposable
+#      # tips on your instrument.
+#      lh = LiquidHandler(backend=EVO(diti_count=8), deck=deck)
+#    The EVO backend talks to the instrument over USB, using the same
+#    driver EVOware uses -- run this on the Windows PC connected to the
+#    liquid handler, with the instrument powered on.
+# 2. Update SOURCE_WELL, TIP_SPOT, MAX_VOLUME_UL, and the deck/resource
+#    setup in withdraw_and_discard() to match your actual deck layout:
+#    which EVO model (EVO100Deck / EVO150Deck / EVO200Deck), which tip
+#    rack and carrier you use, and which rail/carrier positions hold
+#    what. See pylabrobot.resources.tecan for the full list of Tecan
+#    labware definitions (tip racks, plates, carriers).
+# 3. See https://docs.pylabrobot.org for more on the Tecan backend and
+#    its setup requirements.
