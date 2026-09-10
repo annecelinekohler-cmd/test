@@ -1,117 +1,123 @@
-"""Withdraw a user-specified volume of liquid and discard the tip.
+"""Generate a Tecan Fluent worklist that withdraws a user-specified volume
+and discards the tip.
 
-Workflow:
-  1. A popup window asks the user how many microliters (uL) to withdraw.
-  2. The liquid handler picks up a tip, aspirates that volume from the
-     source well, and discards the tip into the wash station's waste port.
+The Tecan Fluent is controlled via FluentControl, not by driving the
+instrument directly from Python. The standard way to script it is to
+write a GWL ("worklist") file -- a plain-text file of Aspirate/Dispense/
+Wash commands -- and run it from a "Worklist" step inside a FluentControl
+method. This script does exactly that:
 
-Built on PyLabRobot (https://docs.pylabrobot.org) targeting a Tecan
-Freedom EVO liquid handler. This script runs in SIMULATION by default
-(no hardware required) so you can try it out safely. To run on real
-hardware, see "Switching to real hardware" below.
+  1. A popup window asks the user for a volume (uL) and a liquid class.
+  2. A .gwl file is written with one Aspirate command for that volume/
+     liquid class, followed by a Wash command (which, for disposable
+     tips, ejects the tip).
+  3. You load/run the generated .gwl file from a Worklist step in
+     FluentControl.
+
+See https://www.tecan.com/knowledge-portal/how-to-use-worklist-in-fluentcontrol
+for how a Worklist step consumes a .gwl file.
 """
 
-import asyncio
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import messagebox, ttk
 
-from pylabrobot.liquid_handling import LiquidHandler
-from pylabrobot.liquid_handling.backends import LiquidHandlerChatterboxBackend
-from pylabrobot.resources.tecan import (
-    EVO150Deck,
-    DiTi_SBS_3_Pos_MCA96,
-    DiTi_100ul_Te_MO,
-    MP_3Pos_PCR,
-    DeepWell_96_Well,
-)
+# Labware label and position the volume is withdrawn from. These must
+# match the RackLabel and Position of a labware item placed on your
+# Fluent worktable/method -- edit to match your actual setup.
+SOURCE_LABWARE = "SourcePlate"
+SOURCE_POSITION = 1
 
-# Well the liquid handler withdraws from, and the tip position it uses.
-# Change these -- along with the deck layout in withdraw_and_discard() --
-# to match your physical deck.
-SOURCE_WELL = "A1"
-TIP_SPOT = "A1"
+OUTPUT_PATH = "withdraw.gwl"
 
-# The tip type below (DiTi_100ul_Te_MO) holds up to 110 uL -- keep the
-# popup's max in sync with whatever tip you actually use.
-MAX_VOLUME_UL = 100.0
+# Common built-in Tecan liquid class names, shown as a starting point.
+# Each one MUST exactly match (case-sensitive) a liquid class that
+# actually exists in your FluentControl liquid class database (Liquid
+# Editor) -- otherwise the worklist step will fail when it runs. Replace
+# this list with your own liquid classes.
+LIQUID_CLASSES = [
+    "Water free dispense",
+    "Water free dispense (with clld)",
+    "DMSO free dispense",
+    "Ethanol 100% free dispense",
+    "Serum free dispense",
+]
 
 
-def ask_volume_ul() -> float | None:
-    """Pop up a window asking the user for a volume in uL.
+def ask_volume_and_liquid_class():
+    """Pop up a window asking for a volume (uL) and a liquid class.
 
-    Returns the entered volume, or None if the user cancelled.
+    Returns a (volume_ul, liquid_class) tuple, or None if cancelled.
     """
+    result = {}
     root = tk.Tk()
-    root.withdraw()  # only show the dialog, not an empty main window
-    volume = simpledialog.askfloat(
-        title="Withdraw Liquid",
-        prompt="Enter volume to withdraw (uL):",
-        minvalue=0.1,
-        maxvalue=MAX_VOLUME_UL,
-        parent=root,
+    root.title("Withdraw Liquid")
+
+    tk.Label(root, text="Volume to withdraw (uL):").grid(
+        row=0, column=0, padx=8, pady=8, sticky="w"
     )
-    root.destroy()
-    return volume
+    volume_entry = tk.Entry(root)
+    volume_entry.grid(row=0, column=1, padx=8, pady=8)
+
+    tk.Label(root, text="Liquid class:").grid(row=1, column=0, padx=8, pady=8, sticky="w")
+    liquid_class_box = ttk.Combobox(root, values=LIQUID_CLASSES, state="readonly")
+    liquid_class_box.current(0)
+    liquid_class_box.grid(row=1, column=1, padx=8, pady=8)
+
+    def on_ok():
+        try:
+            volume = float(volume_entry.get())
+        except ValueError:
+            messagebox.showerror("Invalid input", "Enter a numeric volume in uL.")
+            return
+        if volume <= 0:
+            messagebox.showerror("Invalid input", "Volume must be greater than 0.")
+            return
+        result["volume_ul"] = volume
+        result["liquid_class"] = liquid_class_box.get()
+        root.destroy()
+
+    button_frame = tk.Frame(root)
+    button_frame.grid(row=2, column=0, columnspan=2, pady=8)
+    tk.Button(button_frame, text="OK", command=on_ok).pack(side="left", padx=4)
+    tk.Button(button_frame, text="Cancel", command=root.destroy).pack(side="left", padx=4)
+
+    volume_entry.focus_set()
+    root.mainloop()
+
+    if "volume_ul" not in result:
+        return None
+    return result["volume_ul"], result["liquid_class"]
 
 
-async def withdraw_and_discard(volume_ul: float) -> None:
-    """Pick up a tip, aspirate volume_ul from the source well, discard the tip."""
-    # with_wash_station=True (the default) gives the deck a wash station
-    # with a waste port we use as the tip trash.
-    deck = EVO150Deck()
+def build_gwl(volume_ul: float, liquid_class: str) -> str:
+    """Build GWL text: aspirate volume_ul with liquid_class, then discard the tip.
 
-    tip_carrier = DiTi_SBS_3_Pos_MCA96(name="tip carrier")
-    tip_carrier[0] = tip_rack = DiTi_100ul_Te_MO(name="tip rack")
-    deck.assign_child_resource(tip_carrier, rails=10)
-
-    plate_carrier = MP_3Pos_PCR(name="plate carrier")
-    plate_carrier[0] = source_plate = DeepWell_96_Well(name="source plate")
-    deck.assign_child_resource(plate_carrier, rails=16)
-
-    waste = deck.get_resource("wash_waste")
-
-    # LiquidHandlerChatterboxBackend just prints each command -- swap this
-    # out for the real EVO backend to run on hardware (see module docstring).
-    lh = LiquidHandler(backend=LiquidHandlerChatterboxBackend(), deck=deck)
-    await lh.setup()
-
-    try:
-        await lh.pick_up_tips(tip_rack[TIP_SPOT])
-        await lh.aspirate(source_plate[SOURCE_WELL], vols=[volume_ul])
-        await lh.drop_tips([waste], allow_nonzero_volume=True)
-    finally:
-        await lh.stop()
+    Record format (Tecan GWL spec):
+      A;RackLabel;RackID;RackType;Position;TubeID;Volume;LiquidClass;TipType;TipMask;ForcedRackType
+    RackID, RackType, TubeID, TipType, TipMask and ForcedRackType are left
+    blank to use defaults / the labware's own type.
+    """
+    aspirate = f"A;{SOURCE_LABWARE};;;{SOURCE_POSITION};;{volume_ul};{liquid_class};;;"
+    wash = "W;"
+    return f"{aspirate}\n{wash}\n"
 
 
 def main() -> None:
-    volume_ul = ask_volume_ul()
-    if volume_ul is None:
-        print("Cancelled -- no volume entered.")
+    answer = ask_volume_and_liquid_class()
+    if answer is None:
+        print("Cancelled -- no worklist generated.")
         return
 
-    print(f"Withdrawing {volume_ul} uL...")
-    asyncio.run(withdraw_and_discard(volume_ul))
-    print("Done: tip discarded.")
+    volume_ul, liquid_class = answer
+    gwl_text = build_gwl(volume_ul, liquid_class)
+
+    with open(OUTPUT_PATH, "w") as f:
+        f.write(gwl_text)
+
+    print(f"Wrote {OUTPUT_PATH}:")
+    print(gwl_text)
+    print("Run this from a Worklist step in a FluentControl method.")
 
 
 if __name__ == "__main__":
     main()
-
-# --- Switching to real hardware -------------------------------------------
-# 1. Replace LiquidHandlerChatterboxBackend() above with the real EVO
-#    backend:
-#      from pylabrobot.liquid_handling.backends import EVO
-#      # diti_count = number of LiHa channels configured for disposable
-#      # tips on your instrument.
-#      lh = LiquidHandler(backend=EVO(diti_count=8), deck=deck)
-#    The EVO backend talks to the instrument over USB, using the same
-#    driver EVOware uses -- run this on the Windows PC connected to the
-#    liquid handler, with the instrument powered on.
-# 2. Update SOURCE_WELL, TIP_SPOT, MAX_VOLUME_UL, and the deck/resource
-#    setup in withdraw_and_discard() to match your actual deck layout:
-#    which EVO model (EVO100Deck / EVO150Deck / EVO200Deck), which tip
-#    rack and carrier you use, and which rail/carrier positions hold
-#    what. See pylabrobot.resources.tecan for the full list of Tecan
-#    labware definitions (tip racks, plates, carriers).
-# 3. See https://docs.pylabrobot.org for more on the Tecan backend and
-#    its setup requirements.

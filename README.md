@@ -25,28 +25,41 @@ region, prints the summary, and saves a bar chart to
 - `analysis.py` — the analysis script
 - `liquid_handler/` — liquid handler control script (see below)
 
-## Liquid handler: withdraw & discard
+## Liquid handler: withdraw & discard (Tecan Fluent)
 
-`liquid_handler/withdraw_liquid.py` pops up a window asking for a volume
-in uL, then withdraws that volume with the liquid handler and discards
-the tip into the wash station's waste port. Built on
-[PyLabRobot](https://docs.pylabrobot.org) targeting a **Tecan Freedom
-EVO** (150 deck by default) with a 100uL disposable tip.
+`liquid_handler/withdraw_liquid.py` targets a **Tecan Fluent**. Fluent
+isn't driven directly from Python the way some other liquid handlers
+are — it's controlled through Tecan's FluentControl software, which runs
+worklists: plain-text `.gwl` files listing Aspirate/Dispense/Wash
+commands. So the script:
+
+1. Pops up a window asking for a volume (uL) **and** a liquid class
+   (dropdown).
+2. Writes `withdraw.gwl` with one Aspirate command for that volume/liquid
+   class, followed by a Wash command (which ejects the tip for
+   disposable-tip setups).
 
 ```bash
 python liquid_handler/withdraw_liquid.py
 ```
 
-By default it runs in **simulation** (prints each command, no hardware
-needed) so you can try it safely. To run on real hardware, edit the
-backend and deck layout — instructions are in the comments at the bottom
-of the script. In short: swap in the real `EVO` backend (talks to the
-instrument over USB via the same driver EVOware uses, so it must run on
-the Windows PC connected to the liquid handler), and adjust the tip
-rack/plate/carrier resources and rail positions to match your actual
-deck layout and tip volume.
+Then, in FluentControl, add a **Worklist** step to your method and point
+it at the generated `withdraw.gwl` file to actually run it — see
+[How to use worklist in FluentControl](https://www.tecan.com/knowledge-portal/how-to-use-worklist-in-fluentcontrol).
+
+Before using this for real, edit the constants at the top of the script:
+
+- `SOURCE_LABWARE` / `SOURCE_POSITION` — must match a labware item's
+  RackLabel and Position in your actual Fluent method/worktable.
+- `LIQUID_CLASSES` — these are just common Tecan liquid class names as a
+  starting point. Each one must exactly match (case-sensitive) a liquid
+  class that actually exists in your FluentControl Liquid Editor, or the
+  worklist step will fail when it runs.
 
 Tkinter (used for the popup) ships with most Python installs. If you get
 `ModuleNotFoundError: No module named 'tkinter'`, install it via your
 system package manager, e.g. `sudo apt install python3-tk` on
-Debian/Ubuntu (macOS and Windows installers include it by default).
+Debian/Ubuntu (macOS and Windows installers include it by default). Note
+that GUI popups need a real display — they won't work in a headless
+environment like a cloud dev container (e.g. GitHub Codespaces without a
+virtual desktop).
