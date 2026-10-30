@@ -63,3 +63,21 @@ Debian/Ubuntu (macOS and Windows installers include it by default). Note
 that GUI popups need a real display — they won't work in a headless
 environment like a cloud dev container (e.g. GitHub Codespaces without a
 virtual desktop).
+
+## Liquid handler: automatic tip rack switching (PyLabRobot)
+
+`liquid_handler/auto_tip_rack_switch.py` is a PyLabRobot example (not
+Tecan Fluent, which PyLabRobot doesn't support — see comments at the
+bottom of the script for swapping to a supported real backend, e.g.
+Hamilton STAR/Vantage or Tecan EVO). It picks up tips one at a time from
+a list of tip racks, and once the current rack runs out, automatically
+moves on to the next one instead of erroring.
+
+```bash
+pip install pylabrobot
+python liquid_handler/auto_tip_rack_switch.py
+```
+
+Runs in simulation by default (`LiquidHandlerChatterboxBackend`, no
+hardware needed) and prints each pickup/drop so you can see the switch
+happen when the first rack empties out.
